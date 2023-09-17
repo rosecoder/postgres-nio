@@ -1058,7 +1058,7 @@ final class PostgresNIOTests: XCTestCase {
             "table2_id" int8,
             "intValue" int8,
             "stringValue" text,
-            "dateValue" timestamptz,
+            "dateValue" timestamp,
             PRIMARY KEY ("id")
         );
         """).wait())
@@ -1070,7 +1070,7 @@ final class PostgresNIOTests: XCTestCase {
             "id" int8 NOT NULL,
             "intValue" int8,
             "stringValue" text,
-            "dateValue" timestamptz,
+            "dateValue" timestamp,
             PRIMARY KEY ("id")
         );
         """).wait())

@@ -9,7 +9,7 @@ class Date_PSQLCodableTests: XCTestCase {
 
         var buffer = ByteBuffer()
         value.encode(into: &buffer, context: .default)
-        XCTAssertEqual(Date.psqlType, .timestamptz)
+        XCTAssertEqual(Date.psqlType, .timestamp)
         XCTAssertEqual(buffer.readableBytes, 8)
 
         var result: Date?

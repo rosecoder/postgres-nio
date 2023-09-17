@@ -3,7 +3,7 @@ import struct Foundation.Date
 
 extension Date: PostgresNonThrowingEncodable {
     public static var psqlType: PostgresDataType {
-        .timestamptz
+        .timestamp
     }
 
     public static var psqlFormat: PostgresFormat {

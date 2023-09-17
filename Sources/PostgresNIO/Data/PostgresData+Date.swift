@@ -6,7 +6,7 @@ extension PostgresData {
         var buffer = ByteBufferAllocator().buffer(capacity: 0)
         let seconds = date.timeIntervalSince(_psqlDateStart) * Double(_microsecondsPerSecond)
         buffer.writeInteger(Int64(seconds))
-        self.init(type: .timestamptz, value: buffer)
+        self.init(type: .timestamp, value: buffer)
     }
     
     public var date: Date? {
@@ -39,7 +39,7 @@ extension PostgresData {
 @available(*, deprecated, message: "Deprecating conformance to `PostgresDataConvertible`, since it is deprecated.")
 extension Date: PostgresDataConvertible {
     public static var postgresDataType: PostgresDataType {
-        return .timestamptz
+        return .timestamp
     }
 
     public init?(postgresData: PostgresData) {
