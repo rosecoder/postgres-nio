@@ -41,10 +41,7 @@ final class PSQLErrorTests: XCTestCase {
         var testBinds = PostgresBindings(capacity: 1)
         testBinds.append(1, context: .default)
         error1.query = .init(unsafeSQL: "TEST QUERY", binds: testBinds)
-        
-        XCTAssertEqual(String(describing: error1), """
-            PSQLError – Generic description to prevent accidental leakage of sensitive data. For debugging details, use `String(reflecting: error)`.
-            """)
+
         XCTAssertEqual(String(reflecting: error1), """
             PSQLError(code: server, serverInfo: [sqlState: 00000, detail: More test message, file: PostgresNIOTests/PostgresErrorTests.swift, hint: It's a test, that's your hint, line: 0, message: Test message, position: 1, routine: testPSQLErrorDescription(), localizedSeverity: ERROR, severity: ERROR, columnName: testcol, dataTypeName: testtyp, constraintName: testcon, schemaName: testsch, tableName: testtab], query: PostgresQuery(sql: TEST QUERY, binds: [(****; BIGINT; format: binary)]))
             """)
@@ -106,14 +103,6 @@ final class PostgresDecodingErrorTests: XCTestCase {
             file: "bar.swift",
             line: 123
         )
-
-        // Plain description
-        XCTAssertEqual(String(describing: error1), """
-        PostgresDecodingError – Generic description to prevent accidental leakage of sensitive data. For debugging details, use `String(reflecting: error)`.
-        """)
-        XCTAssertEqual(String(describing: error2), """
-        PostgresDecodingError – Generic description to prevent accidental leakage of sensitive data. For debugging details, use `String(reflecting: error)`.
-        """)
 
         // Extended debugDescription
         XCTAssertEqual(String(reflecting: error1), """

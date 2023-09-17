@@ -459,17 +459,6 @@ public struct PSQLError: Error {
     }
 }
 
-extension PSQLError: CustomStringConvertible {
-    public var description: String {
-        // This may seem very odd... But we are afraid that users might accidentally send the
-        // unfiltered errors out to end-users. This may leak security relevant information. For this
-        // reason we overwrite the error description by default to this generic "Database error"
-        """
-        PSQLError – Generic description to prevent accidental leakage of sensitive data. For debugging details, use `String(reflecting: error)`.
-        """
-    }
-}
-
 extension PSQLError: CustomDebugStringConvertible {
     public var debugDescription: String {
         var result = #"PSQLError(code: \#(self.code)"#
@@ -603,17 +592,6 @@ public struct PostgresDecodingError: Error, Equatable {
             && lhs.postgresData == rhs.postgresData
             && lhs.file == rhs.file
             && lhs.line == rhs.line
-    }
-}
-
-extension PostgresDecodingError: CustomStringConvertible {
-    public var description: String {
-        // This may seem very odd... But we are afraid that users might accidentally send the
-        // unfiltered errors out to end-users. This may leak security relevant information. For this
-        // reason we overwrite the error description by default to this generic "Database error"
-        """
-        PostgresDecodingError – Generic description to prevent accidental leakage of sensitive data. For debugging details, use `String(reflecting: error)`.
-        """
     }
 }
 
