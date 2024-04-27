@@ -44,7 +44,7 @@ public final class PostgresConnection: @unchecked Sendable {
         return !self.channel.isActive
     }
 
-    let id: ID
+    public let id: ID
 
     private var _logger: Logger
 
@@ -144,8 +144,9 @@ public final class PostgresConnection: @unchecked Sendable {
         on eventLoop: EventLoop
     ) -> EventLoopFuture<PostgresConnection> {
 
-        var logger = logger
-        logger[postgresMetadataKey: .connectionID] = "\(connectionID)"
+        var mlogger = logger
+        mlogger[postgresMetadataKey: .connectionID] = "\(connectionID)"
+        let logger = mlogger
 
         // Here we dispatch to the `eventLoop` first before we setup the EventLoopFuture chain, to
         // ensure all `flatMap`s are executed on the EventLoop (this means the enqueuing of the
@@ -233,6 +234,7 @@ public final class PostgresConnection: @unchecked Sendable {
         let context = ExtendedQueryContext(
             name: name,
             query: query,
+            bindingDataTypes: [],
             logger: logger,
             promise: promise
         )
@@ -391,7 +393,7 @@ extension PostgresConnection {
             self.channel.triggerUserOutboundEvent(PSQLOutgoingEvent.gracefulShutdown, promise: promise)
             return try await promise.futureResult.get()
         } onCancel: {
-            _ = self.close()
+            self.close()
         }
     }
 
@@ -471,9 +473,10 @@ extension PostgresConnection {
         let bindings = try preparedStatement.makeBindings()
         let promise = self.channel.eventLoop.makePromise(of: PSQLRowStream.self)
         let task = HandlerTask.executePreparedStatement(.init(
-            name: String(reflecting: Statement.self),
+            name: Statement.name,
             sql: Statement.sql,
             bindings: bindings,
+            bindingDataTypes: Statement.bindingDataTypes,
             logger: logger,
             promise: promise
         ))
@@ -492,10 +495,10 @@ extension PostgresConnection {
             )
             throw error // rethrow with more metadata
         }
-
     }
 
     /// Execute a prepared statement, taking care of the preparation when necessary
+    @_disfavoredOverload
     public func execute<Statement: PostgresPreparedStatement>(
         _ preparedStatement: Statement,
         logger: Logger,
@@ -505,9 +508,10 @@ extension PostgresConnection {
         let bindings = try preparedStatement.makeBindings()
         let promise = self.channel.eventLoop.makePromise(of: PSQLRowStream.self)
         let task = HandlerTask.executePreparedStatement(.init(
-            name: String(reflecting: Statement.self),
+            name: Statement.name,
             sql: Statement.sql,
             bindings: bindings,
+            bindingDataTypes: Statement.bindingDataTypes,
             logger: logger,
             promise: promise
         ))
@@ -567,12 +571,13 @@ extension PostgresConnection {
     ///   - line: The line, the query was started in. Used for better error reporting.
     ///   - onRow: A closure that is invoked for every row.
     /// - Returns: An EventLoopFuture, that allows access to the future ``PostgresQueryMetadata``.
+    @preconcurrency
     public func query(
         _ query: PostgresQuery,
         logger: Logger,
         file: String = #fileID,
         line: Int = #line,
-        _ onRow: @escaping (PostgresRow) throws -> ()
+        _ onRow: @escaping @Sendable (PostgresRow) throws -> ()
     ) -> EventLoopFuture<PostgresQueryMetadata> {
         self.queryStream(query, logger: logger).flatMap { rowStream in
             rowStream.onRow(onRow).flatMapThrowing { () -> PostgresQueryMetadata in
@@ -638,6 +643,7 @@ extension PostgresConnection: PostgresDatabase {
         }
     }
 
+    @preconcurrency
     public func withConnection<T>(_ closure: (PostgresConnection) -> EventLoopFuture<T>) -> EventLoopFuture<T> {
         closure(self)
     }
@@ -645,11 +651,11 @@ extension PostgresConnection: PostgresDatabase {
 
 internal enum PostgresCommands: PostgresRequest {
     case query(PostgresQuery,
-               onMetadata: (PostgresQueryMetadata) -> () = { _ in },
-               onRow: (PostgresRow) throws -> ())
-    case queryAll(PostgresQuery, onResult: (PostgresQueryResult) -> ())
+               onMetadata: @Sendable (PostgresQueryMetadata) -> () = { _ in },
+               onRow: @Sendable (PostgresRow) throws -> ())
+    case queryAll(PostgresQuery, onResult: @Sendable (PostgresQueryResult) -> ())
     case prepareQuery(request: PrepareQueryRequest)
-    case executePreparedStatement(query: PreparedQuery, binds: [PostgresData], onRow: (PostgresRow) throws -> ())
+    case executePreparedStatement(query: PreparedQuery, binds: [PostgresData], onRow: @Sendable (PostgresRow) throws -> ())
 
     func respond(to message: PostgresMessage) throws -> [PostgresMessage]? {
         fatalError("This function must not be called")

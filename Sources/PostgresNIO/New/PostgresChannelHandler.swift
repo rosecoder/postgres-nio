@@ -328,7 +328,7 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
         case .wait:
             break
         case .sendStartupMessage(let authContext):
-            self.encoder.startup(user: authContext.username, database: authContext.database)
+            self.encoder.startup(user: authContext.username, database: authContext.database, options: authContext.additionalParameters)
             context.writeAndFlush(self.wrapOutboundOut(self.encoder.flushBuffer()), promise: nil)
         case .sendSSLRequest:
             self.encoder.ssl()
@@ -345,8 +345,8 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
             self.closeConnectionAndCleanup(cleanupContext, context: context)
         case .fireChannelInactive:
             context.fireChannelInactive()
-        case .sendParseDescribeSync(let name, let query):
-            self.sendParseDecribeAndSyncMessage(statementName: name, query: query, context: context)
+        case .sendParseDescribeSync(let name, let query, let bindingDataTypes):
+            self.sendParseDescribeAndSyncMessage(statementName: name, query: query, bindingDataTypes: bindingDataTypes, context: context)
         case .sendBindExecuteSync(let executeStatement):
             self.sendBindExecuteAndSyncMessage(executeStatement: executeStatement, context: context)
         case .sendParseDescribeBindExecuteSync(let query):
@@ -489,13 +489,14 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
         }
     }
     
-    private func sendParseDecribeAndSyncMessage(
+    private func sendParseDescribeAndSyncMessage(
         statementName: String,
         query: String,
+        bindingDataTypes: [PostgresDataType],
         context: ChannelHandlerContext
     ) {
         precondition(self.rowStream == nil, "Expected to not have an open stream at this point")
-        self.encoder.parse(preparedStatementName: statementName, query: query, parameters: [])
+        self.encoder.parse(preparedStatementName: statementName, query: query, parameters: bindingDataTypes)
         self.encoder.describePreparedStatement(statementName)
         self.encoder.sync()
         context.writeAndFlush(self.wrapOutboundOut(self.encoder.flushBuffer()), promise: nil)
@@ -593,12 +594,14 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
     private func makeStartListeningQuery(channel: String, context: ChannelHandlerContext) -> PSQLTask {
         let promise = context.eventLoop.makePromise(of: PSQLRowStream.self)
         let query = ExtendedQueryContext(
-            query: PostgresQuery(unsafeSQL: "LISTEN \(channel);"),
+            query: PostgresQuery(unsafeSQL: #"LISTEN "\#(channel)";"#),
             logger: self.logger,
             promise: promise
         )
+        let loopBound = NIOLoopBound((self, context), eventLoop: self.eventLoop)
         promise.futureResult.whenComplete { result in
-            self.startListenCompleted(result, for: channel, context: context)
+            let (selfTransferred, context) = loopBound.value
+            selfTransferred.startListenCompleted(result, for: channel, context: context)
         }
 
         return .extendedQuery(query)
@@ -639,12 +642,14 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
     private func makeUnlistenQuery(channel: String, context: ChannelHandlerContext) -> PSQLTask {
         let promise = context.eventLoop.makePromise(of: PSQLRowStream.self)
         let query = ExtendedQueryContext(
-            query: PostgresQuery(unsafeSQL: "UNLISTEN \(channel);"),
+            query: PostgresQuery(unsafeSQL: #"UNLISTEN "\#(channel)";"#),
             logger: self.logger,
             promise: promise
         )
+        let loopBound = NIOLoopBound((self, context), eventLoop: self.eventLoop)
         promise.futureResult.whenComplete { result in
-            self.stopListenCompleted(result, for: channel, context: context)
+            let (selfTransferred, context) = loopBound.value
+            selfTransferred.stopListenCompleted(result, for: channel, context: context)
         }
 
         return .extendedQuery(query)
@@ -693,10 +698,12 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
         context: ChannelHandlerContext
     ) -> PSQLTask {
         let promise = self.eventLoop.makePromise(of: RowDescription?.self)
+        let loopBound = NIOLoopBound((self, context), eventLoop: self.eventLoop)
         promise.futureResult.whenComplete { result in
+            let (selfTransferred, context) = loopBound.value
             switch result {
             case .success(let rowDescription):
-                self.prepareStatementComplete(
+                selfTransferred.prepareStatementComplete(
                     name: preparedStatement.name,
                     rowDescription: rowDescription,
                     context: context
@@ -708,7 +715,7 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
                 } else {
                     psqlError = .connectionError(underlying: error)
                 }
-                self.prepareStatementFailed(
+                selfTransferred.prepareStatementFailed(
                     name: preparedStatement.name,
                     error: psqlError,
                     context: context
@@ -718,6 +725,7 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
         return .extendedQuery(.init(
             name: preparedStatement.name,
             query: preparedStatement.sql,
+            bindingDataTypes: preparedStatement.bindingDataTypes,
             logger: preparedStatement.logger,
             promise: promise
         ))

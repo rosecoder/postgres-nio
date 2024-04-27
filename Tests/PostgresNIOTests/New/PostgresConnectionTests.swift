@@ -51,7 +51,7 @@ class PostgresConnectionTests: XCTestCase {
             }
 
             let listenMessage = try await channel.waitForUnpreparedRequest()
-            XCTAssertEqual(listenMessage.parse.query, "LISTEN foo;")
+            XCTAssertEqual(listenMessage.parse.query, #"LISTEN "foo";"#)
 
             try await channel.writeInbound(PostgresBackendMessage.parseComplete)
             try await channel.writeInbound(PostgresBackendMessage.parameterDescription(.init(dataTypes: [])))
@@ -63,7 +63,7 @@ class PostgresConnectionTests: XCTestCase {
             try await channel.writeInbound(PostgresBackendMessage.notification(.init(backendPID: 12, channel: "foo", payload: "wooohooo")))
 
             let unlistenMessage = try await channel.waitForUnpreparedRequest()
-            XCTAssertEqual(unlistenMessage.parse.query, "UNLISTEN foo;")
+            XCTAssertEqual(unlistenMessage.parse.query, #"UNLISTEN "foo";"#)
 
             try await channel.writeInbound(PostgresBackendMessage.parseComplete)
             try await channel.writeInbound(PostgresBackendMessage.parameterDescription(.init(dataTypes: [])))
@@ -111,7 +111,7 @@ class PostgresConnectionTests: XCTestCase {
             }
 
             let listenMessage = try await channel.waitForUnpreparedRequest()
-            XCTAssertEqual(listenMessage.parse.query, "LISTEN foo;")
+            XCTAssertEqual(listenMessage.parse.query, #"LISTEN "foo";"#)
 
             try await channel.writeInbound(PostgresBackendMessage.parseComplete)
             try await channel.writeInbound(PostgresBackendMessage.parameterDescription(.init(dataTypes: [])))
@@ -124,7 +124,7 @@ class PostgresConnectionTests: XCTestCase {
             try await channel.writeInbound(PostgresBackendMessage.notification(.init(backendPID: 12, channel: "foo", payload: "wooohooo2")))
 
             let unlistenMessage = try await channel.waitForUnpreparedRequest()
-            XCTAssertEqual(unlistenMessage.parse.query, "UNLISTEN foo;")
+            XCTAssertEqual(unlistenMessage.parse.query, #"UNLISTEN "foo";"#)
 
             try await channel.writeInbound(PostgresBackendMessage.parseComplete)
             try await channel.writeInbound(PostgresBackendMessage.parameterDescription(.init(dataTypes: [])))
@@ -155,12 +155,12 @@ class PostgresConnectionTests: XCTestCase {
                     _ = try await iterator.next()
                     XCTFail("Did not expect to not throw")
                 } catch {
-                    print(error)
+                    self.logger.error("error", metadata: ["error": "\(error)"])
                 }
             }
 
             let listenMessage = try await channel.waitForUnpreparedRequest()
-            XCTAssertEqual(listenMessage.parse.query, "LISTEN foo;")
+            XCTAssertEqual(listenMessage.parse.query, #"LISTEN "foo";"#)
 
             try await channel.writeInbound(PostgresBackendMessage.parseComplete)
             try await channel.writeInbound(PostgresBackendMessage.parameterDescription(.init(dataTypes: [])))
@@ -304,7 +304,7 @@ class PostgresConnectionTests: XCTestCase {
     }
 
     struct TestPrepareStatement: PostgresPreparedStatement {
-        static var sql = "SELECT datname FROM pg_stat_activity WHERE state = $1"
+        static let sql = "SELECT datname FROM pg_stat_activity WHERE state = $1"
         typealias Row = String
 
         var state: String
@@ -337,7 +337,7 @@ class PostgresConnectionTests: XCTestCase {
 
             let prepareRequest = try await channel.waitForPrepareRequest()
             XCTAssertEqual(prepareRequest.parse.query, "SELECT datname FROM pg_stat_activity WHERE state = $1")
-            XCTAssertEqual(prepareRequest.parse.parameters.count, 0)
+            XCTAssertEqual(prepareRequest.parse.parameters.first, .text)
             guard case .preparedStatement(let name) = prepareRequest.describe else {
                 fatalError("Describe should contain a prepared statement")
             }
@@ -393,7 +393,7 @@ class PostgresConnectionTests: XCTestCase {
 
             let prepareRequest = try await channel.waitForPrepareRequest()
             XCTAssertEqual(prepareRequest.parse.query, "SELECT datname FROM pg_stat_activity WHERE state = $1")
-            XCTAssertEqual(prepareRequest.parse.parameters.count, 0)
+            XCTAssertEqual(prepareRequest.parse.parameters.first, .text)
             guard case .preparedStatement(let name) = prepareRequest.describe else {
                 fatalError("Describe should contain a prepared statement")
             }
@@ -487,7 +487,7 @@ class PostgresConnectionTests: XCTestCase {
             // The channel deduplicates prepare requests, we're going to see only one of them
             let prepareRequest = try await channel.waitForPrepareRequest()
             XCTAssertEqual(prepareRequest.parse.query, "SELECT datname FROM pg_stat_activity WHERE state = $1")
-            XCTAssertEqual(prepareRequest.parse.parameters.count, 0)
+            XCTAssertEqual(prepareRequest.parse.parameters.first, .text)
             guard case .preparedStatement(let name) = prepareRequest.describe else {
                 fatalError("Describe should contain a prepared statement")
             }
@@ -555,7 +555,7 @@ class PostgresConnectionTests: XCTestCase {
 
             let prepareRequest = try await channel.waitForPrepareRequest()
             XCTAssertEqual(prepareRequest.parse.query, "SELECT datname FROM pg_stat_activity WHERE state = $1")
-            XCTAssertEqual(prepareRequest.parse.parameters.count, 0)
+            XCTAssertEqual(prepareRequest.parse.parameters.first, .text)
             guard case .preparedStatement(let name) = prepareRequest.describe else {
                 fatalError("Describe should contain a prepared statement")
             }
@@ -602,7 +602,7 @@ class PostgresConnectionTests: XCTestCase {
 
         async let connectionPromise = PostgresConnection.connect(on: eventLoop, configuration: configuration, id: 1, logger: self.logger)
         let message = try await channel.waitForOutboundWrite(as: PostgresFrontendMessage.self)
-        XCTAssertEqual(message, .startup(.versionThree(parameters: .init(user: "username", database: "database", replication: .false))))
+        XCTAssertEqual(message, .startup(.versionThree(parameters: .init(user: "username", database: "database", options: [], replication: .false))))
         try await channel.writeInbound(PostgresBackendMessage.authentication(.ok))
         try await channel.writeInbound(PostgresBackendMessage.backendKeyData(.init(processID: 1234, secretKey: 5678)))
         try await channel.writeInbound(PostgresBackendMessage.readyForQuery(.idle))

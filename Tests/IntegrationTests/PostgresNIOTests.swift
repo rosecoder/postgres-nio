@@ -9,12 +9,14 @@ import NIOSSL
 final class PostgresNIOTests: XCTestCase {
     
     private var group: EventLoopGroup!
-
     private var eventLoop: EventLoop { self.group.next() }
+    
+    override class func setUp() {
+        XCTAssertTrue(isLoggingConfigured)
+    }
     
     override func setUpWithError() throws {
         try super.setUpWithError()
-        XCTAssertTrue(isLoggingConfigured)
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
     
@@ -615,21 +617,25 @@ final class PostgresNIOTests: XCTestCase {
         let a = PostgresNumeric(string: "123456.789123")!
         let b = PostgresNumeric(string: "-123456.789123")!
         let c = PostgresNumeric(string: "3.14159265358979")!
+        let d = PostgresNumeric(string: "1234567898765")!
         var rows: PostgresQueryResult?
         XCTAssertNoThrow(rows = try conn?.query("""
         select
             $1::numeric as a,
             $2::numeric as b,
-            $3::numeric as c
+            $3::numeric as c,
+            $4::numeric as d
         """, [
             .init(numeric: a),
             .init(numeric: b),
-            .init(numeric: c)
+            .init(numeric: c),
+            .init(numeric: d)
         ]).wait())
         let row = rows?.first?.makeRandomAccess()
         XCTAssertEqual(row?[data: "a"].decimal, Decimal(string: "123456.789123")!)
         XCTAssertEqual(row?[data: "b"].decimal, Decimal(string: "-123456.789123")!)
         XCTAssertEqual(row?[data: "c"].decimal, Decimal(string: "3.14159265358979")!)
+        XCTAssertEqual(row?[data: "d"].decimal, Decimal(string: "1234567898765")!)
     }
     
     func testDecimalStringSerialization() {
@@ -783,6 +789,44 @@ final class PostgresNIOTests: XCTestCase {
         XCTAssertEqual(row?[data: "array"].array(of: Int64?.self), [1, nil, 3])
     }
     
+    @available(*, deprecated, message: "Testing deprecated functionality")
+    func testDateArraySerialize() {
+        var conn: PostgresConnection?
+        XCTAssertNoThrow(conn = try PostgresConnection.test(on: eventLoop).wait())
+        defer { XCTAssertNoThrow( try conn?.close().wait() ) }
+        let date1 = Date(timeIntervalSince1970: 1704088800),
+            date2 = Date(timeIntervalSince1970: 1706767200),
+            date3 = Date(timeIntervalSince1970: 1709272800)
+        var rows: PostgresQueryResult?
+        XCTAssertNoThrow(rows = try conn?.query("""
+        select
+            $1::timestamptz[] as array
+        """, [
+            PostgresData(array: [date1, date2, date3])
+        ]).wait())
+        let row = rows?.first?.makeRandomAccess()
+        XCTAssertEqual(row?[data: "array"].array(of: Date.self), [date1, date2, date3])
+    }
+
+    @available(*, deprecated, message: "Testing deprecated functionality")
+    func testDateArraySerializeAsPostgresDate() {
+        var conn: PostgresConnection?
+        XCTAssertNoThrow(conn = try PostgresConnection.test(on: eventLoop).wait())
+        defer { XCTAssertNoThrow(try conn?.close().wait()) }
+        let date1 = Date(timeIntervalSince1970: 1704088800),//8766
+            date2 = Date(timeIntervalSince1970: 1706767200),//8797
+            date3 = Date(timeIntervalSince1970: 1709272800) //8826
+        var data = PostgresData(array: [date1, date2, date3].map { Int32(($0.timeIntervalSince1970 - 946_684_800) / 86_400).postgresData }, elementType: .date)
+        data.type = .dateArray // N.B.: `.date` format is an Int32 count of days since psqlStartDate
+        var rows: PostgresQueryResult?
+        XCTAssertNoThrow(rows = try conn?.query("select $1::date[] as array", [data]).wait())
+        let row = rows?.first?.makeRandomAccess()
+        XCTAssertEqual(
+            row?[data: "array"].array(of: Date.self)?.map { Int32((($0.timeIntervalSince1970 - 946_684_800) / 86_400).rounded(.toNearestOrAwayFromZero)) },
+            [date1, date2, date3].map { Int32((($0.timeIntervalSince1970 - 946_684_800) / 86_400).rounded(.toNearestOrAwayFromZero)) }
+        )
+    }
+
     // https://github.com/vapor/postgres-nio/issues/143
     func testEmptyStringFromNonNullColumn() {
         var conn: PostgresConnection?
@@ -1437,7 +1481,7 @@ final class PostgresNIOTests: XCTestCase {
 let isLoggingConfigured: Bool = {
     LoggingSystem.bootstrap { label in
         var handler = StreamLogHandler.standardOutput(label: label)
-        handler.logLevel = env("LOG_LEVEL").flatMap { Logger.Level(rawValue: $0) } ?? .debug
+        handler.logLevel = env("LOG_LEVEL").flatMap { .init(rawValue: $0) } ?? .info
         return handler
     }
     return true

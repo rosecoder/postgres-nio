@@ -97,7 +97,7 @@ struct ConnectionStateMachine {
         case forwardStreamError(PSQLError, read: Bool, cleanupContext: CleanUpContext?)
         
         // Prepare statement actions
-        case sendParseDescribeSync(name: String, query: String)
+        case sendParseDescribeSync(name: String, query: String, bindingDataTypes: [PostgresDataType])
         case succeedPreparedStatementCreation(EventLoopPromise<RowDescription?>, with: RowDescription?)
         case failPreparedStatementCreation(EventLoopPromise<RowDescription?>, with: PSQLError, cleanupContext: CleanUpContext?)
 
@@ -587,7 +587,7 @@ struct ConnectionStateMachine {
             switch queryContext.query {
             case .executeStatement(_, let promise), .unnamed(_, let promise):
                 return .failQuery(promise, with: psqlErrror, cleanupContext: nil)
-            case .prepareStatement(_, _, let promise):
+            case .prepareStatement(_, _, _, let promise):
                 return .failPreparedStatementCreation(promise, with: psqlErrror, cleanupContext: nil)
             }
         case .closeCommand(let closeContext):
@@ -624,21 +624,19 @@ struct ConnectionStateMachine {
     mutating func readEventCaught() -> ConnectionAction {
         switch self.state {
         case .initialized:
-            preconditionFailure("Received a read event on a connection that was never opened.")
-        case .sslRequestSent:
+            preconditionFailure("Invalid state: \(self.state). Read event before connection established?")
+
+        case .sslRequestSent,
+             .sslNegotiated,
+             .sslHandlerAdded,
+             .waitingToStartAuthentication,
+             .authenticating,
+             .authenticated,
+             .readyForQuery,
+             .closing:
+            // all states in which we definitely want to make further forward progress...
             return .read
-        case .sslNegotiated:
-            return .read
-        case .sslHandlerAdded:
-            return .read
-        case .waitingToStartAuthentication:
-            return .read
-        case .authenticating:
-            return .read
-        case .authenticated:
-            return .read
-        case .readyForQuery:
-            return .read
+
         case .extendedQuery(var extendedQuery, let connectionContext):
             self.state = .modifying // avoid CoW
             let action = extendedQuery.readEventCaught()
@@ -651,12 +649,15 @@ struct ConnectionStateMachine {
             self.state = .closeCommand(closeState, connectionContext)
             return self.modify(with: action)
 
-        case .closing:
-            return .read
         case .closed:
-            preconditionFailure("How can we receive a read, if the connection is closed")
+            // Generally we shouldn't see this event (read after connection closed?!).
+            // But truth is, adopters run into this, again and again. So preconditioning here leads
+            // to unnecessary crashes. So let's be resilient and just make more forward progress.
+            // If we really care, we probably need to dive deep into PostgresNIO and SwiftNIO.
+            return .read
+
         case .modifying:
-            preconditionFailure("Invalid state")
+            preconditionFailure("Invalid state: \(self.state)")
         }
     }
     
@@ -985,7 +986,7 @@ extension ConnectionStateMachine {
             }
             
             return false
-        case .clientClosedConnection:
+        case .clientClosedConnection, .poolClosed:
             preconditionFailure("A pure client error was thrown directly in PostgresConnection, this shouldn't happen")
         case .serverClosedConnection:
             return true
@@ -1056,8 +1057,8 @@ extension ConnectionStateMachine {
             return .read
         case .wait:
             return .wait
-        case .sendParseDescribeSync(name: let name, query: let query):
-            return .sendParseDescribeSync(name: name, query: query)
+        case .sendParseDescribeSync(name: let name, query: let query, bindingDataTypes: let bindingDataTypes):
+            return .sendParseDescribeSync(name: name, query: query, bindingDataTypes: bindingDataTypes)
         case .succeedPreparedStatementCreation(let promise, with: let rowDescription):
             return .succeedPreparedStatementCreation(promise, with: rowDescription)
         case .failPreparedStatementCreation(let promise, with: let error):
@@ -1113,17 +1114,41 @@ struct SendPrepareStatement {
     let query: String
 }
 
-struct AuthContext: Equatable, CustomDebugStringConvertible {
-    let username: String
-    let password: String?
-    let database: String?
-    
+struct AuthContext: CustomDebugStringConvertible {
+    var username: String
+    var password: String?
+    var database: String?
+    var additionalParameters: [(String, String)]
+
+    init(username: String, password: String? = nil, database: String? = nil, additionalParameters: [(String, String)] = []) {
+        self.username = username
+        self.password = password
+        self.database = database
+        self.additionalParameters = additionalParameters
+    }
+
     var debugDescription: String {
         """
         AuthContext(username: \(String(reflecting: self.username)), \
         password: \(self.password != nil ? "********" : "nil"), \
         database: \(self.database != nil ? String(reflecting: self.database!) : "nil"))
         """
+    }
+}
+
+extension AuthContext: Equatable {
+    static func ==(lhs: Self, rhs: Self) -> Bool {
+        guard lhs.username == rhs.username
+                && lhs.password == rhs.password
+                && lhs.database == rhs.database
+                && lhs.additionalParameters.count == rhs.additionalParameters.count
+        else {
+            return false
+        }
+
+        return lhs.additionalParameters.elementsEqual(rhs.additionalParameters) { lhs, rhs in
+            lhs.0 == rhs.0 && lhs.1 == rhs.1
+        }
     }
 }
 
