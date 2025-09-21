@@ -930,6 +930,22 @@ final class PostgresNIOTests: XCTestCase {
         }
     }
 
+    func testJSONBDecodeString() {
+        var conn: PostgresConnection?
+        XCTAssertNoThrow(conn = try PostgresConnection.test(on: eventLoop).wait())
+        defer { XCTAssertNoThrow(try conn?.close().wait()) }
+
+        do {
+            var rows: PostgresQueryResult?
+            XCTAssertNoThrow(rows = try conn?.query("select '{\"hello\": \"world\"}'::jsonb as data").wait())
+            
+            var resultString: String?
+            XCTAssertNoThrow(resultString = try rows?.first?.decode(String.self, context: .default))
+
+            XCTAssertEqual(resultString, "{\"hello\": \"world\"}")
+        }
+    }
+
     func testInt4RangeSerialize() async throws {
         let conn: PostgresConnection = try await PostgresConnection.test(on: eventLoop).get()
         self.addTeardownBlock {
@@ -1030,28 +1046,6 @@ final class PostgresNIOTests: XCTestCase {
             let decodedClosedRange: ClosedRange<Int64>? = try row?.decode(ClosedRange<Int64>.self, context: .default)
             XCTAssertEqual(closedRange, decodedClosedRange)
         }
-    }
-
-    func testRemoteTLSServer() {
-        // postgres://uymgphwj:7_tHbREdRwkqAdu4KoIS7hQnNxr8J1LA@elmer.db.elephantsql.com:5432/uymgphwj
-        var conn: PostgresConnection?
-        let logger = Logger(label: "test")
-        let sslContext = try! NIOSSLContext(configuration: .makeClientConfiguration())
-        let config = PostgresConnection.Configuration(
-            host: "elmer.db.elephantsql.com",
-            port: 5432,
-            username: "uymgphwj",
-            password: "7_tHbREdRwkqAdu4KoIS7hQnNxr8J1LA",
-            database: "uymgphwj",
-            tls: .require(sslContext)
-        )
-        XCTAssertNoThrow(conn = try PostgresConnection.connect(on: eventLoop, configuration: config, id: 0, logger: logger).wait())
-        defer { XCTAssertNoThrow( try conn?.close().wait() ) }
-        var rows: [PostgresRow]?
-        XCTAssertNoThrow(rows = try conn?.simpleQuery("SELECT version()").wait())
-        XCTAssertEqual(rows?.count, 1)
-        let row = rows?.first?.makeRandomAccess()
-        XCTAssertEqual(row?[data: "version"].string?.contains("PostgreSQL"), true)
     }
 
     @available(*, deprecated, message: "Test deprecated functionality")

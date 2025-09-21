@@ -42,6 +42,110 @@ final class PostgresClientTests: XCTestCase {
             taskGroup.cancelAll()
         }
     }
+    
+    func testTransaction() async throws {
+        var mlogger = Logger(label: "test")
+        mlogger.logLevel = .debug
+        let logger = mlogger
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 8)
+        self.addTeardownBlock {
+            try await eventLoopGroup.shutdownGracefully()
+        }
+        
+        let tableName = "test_client_transactions"
+        
+        let clientConfig = PostgresClient.Configuration.makeTestConfiguration()
+        let client = PostgresClient(configuration: clientConfig, eventLoopGroup: eventLoopGroup, backgroundLogger: logger)
+        
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { taskGroup in
+                taskGroup.addTask {
+                    await client.run()
+                }
+                
+                try await client.query(
+                    """
+                    CREATE TABLE IF NOT EXISTS "\(unescaped: tableName)" (
+                        id INT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+                        uuid UUID NOT NULL
+                    );
+                    """,
+                    logger: logger
+                )
+                
+                let iterations = 1000
+                
+                for _ in 0..<iterations {
+                    taskGroup.addTask {
+                        let _ = try await client.withTransaction(logger: logger) { transaction in
+                            try await transaction.query(
+                            """
+                            INSERT INTO "\(unescaped: tableName)" (uuid) VALUES (\(UUID()));
+                            """,
+                            logger: logger
+                            )
+                        }
+                    }
+                }
+                
+                for _ in 0..<iterations {
+                    _ = await taskGroup.nextResult()!
+                }
+                
+                let rows = try await client.query(#"SELECT COUNT(1)::INT AS table_size FROM "\#(unescaped: tableName)";"#, logger: logger).decode(Int.self)
+                for try await (count) in rows {
+                    XCTAssertEqual(count, iterations)
+                }
+                
+                /// Test roll back
+                taskGroup.addTask {
+                    
+                    do {
+                        let _ = try await client.withTransaction(logger: logger) { transaction in
+                            /// insert valid data
+                            try await transaction.query(
+                                """
+                                INSERT INTO "\(unescaped: tableName)" (uuid) VALUES (\(UUID()));
+                                """,
+                                logger: logger
+                            )
+                            
+                            /// insert invalid data
+                            try await transaction.query(
+                                """
+                                INSERT INTO "\(unescaped: tableName)" (uuid) VALUES (\(iterations));
+                                """,
+                                logger: logger
+                            )
+                        }
+                    } catch {
+                        XCTAssertNotNil(error)
+                        guard let error = error as? PostgresTransactionError else { return XCTFail("Unexpected error type: \(error)") }
+
+                        XCTAssertEqual((error.closureError as? PSQLError)?.code, .server)
+                        XCTAssertEqual((error.closureError as? PSQLError)?.serverInfo?[.severity], "ERROR")
+                    }
+                }
+                
+                let row = try await client.query(#"SELECT COUNT(1)::INT AS table_size FROM "\#(unescaped: tableName)";"#, logger: logger).decode(Int.self)
+                
+                for try await (count) in row {
+                    XCTAssertEqual(count, iterations)
+                }
+                
+                try await client.query(
+                    """
+                    DROP TABLE "\(unescaped: tableName)";
+                    """,
+                    logger: logger
+                )
+                
+                taskGroup.cancelAll()
+            }
+        } catch {
+            XCTFail("Unexpected error: \(String(reflecting: error))")
+        }
+    }
 
     func testApplicationNameIsForwardedCorrectly() async throws {
         var mlogger = Logger(label: "test")
@@ -188,6 +292,61 @@ final class PostgresClientTests: XCTestCase {
             XCTFail("Unexpected error: \(String(reflecting: error))")
         }
     }
+
+    func testLTree() async throws {
+        let tableName = "test_client_ltree"
+
+        var mlogger = Logger(label: "test")
+        mlogger.logLevel = .debug
+        let logger = mlogger
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 8)
+        self.addTeardownBlock {
+            try await eventLoopGroup.shutdownGracefully()
+        }
+
+        let clientConfig = PostgresClient.Configuration.makeTestConfiguration()
+        let client = PostgresClient(configuration: clientConfig, eventLoopGroup: eventLoopGroup, backgroundLogger: logger)
+
+        try await withThrowingTaskGroup(of: Void.self) { taskGroup in
+            taskGroup.addTask {
+                await client.run()
+            }
+
+            try await client.query("CREATE EXTENSION IF NOT EXISTS ltree;")
+
+            try await client.query("DROP TABLE IF EXISTS \"\(unescaped: tableName)\";")
+
+            try await client.query(
+                """
+                CREATE TABLE IF NOT EXISTS "\(unescaped: tableName)" (
+                    id SERIAL PRIMARY KEY,
+                    label ltree NOT NULL
+                );
+                """
+            )
+
+            try await client.query(
+                """
+                INSERT INTO "\(unescaped: tableName)" (label) VALUES ('foo.bar.baz')
+                """
+            )
+
+            let rows = try await client.query(
+                """
+                SELECT id, label FROM "\(unescaped: tableName)" WHERE label ~ 'foo.*'
+                """
+            )
+
+            var count = 0
+            for try await _ in rows.decode((Int, String).self) {
+                count += 1
+            }
+            XCTAssertEqual(count, 1)
+
+            taskGroup.cancelAll()
+        }
+    }
+
 }
 
 @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)

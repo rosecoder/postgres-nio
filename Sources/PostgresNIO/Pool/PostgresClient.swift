@@ -293,19 +293,63 @@ public final class PostgresClient: Sendable, ServiceLifecycle.Service {
             return ConnectionAndMetadata(connection: connection, maximalStreamsOnConnection: 1)
         }
     }
-
     
     /// Lease a connection for the provided `closure`'s lifetime.
     ///
     /// - Parameter closure: A closure that uses the passed `PostgresConnection`. The closure **must not** capture
     ///                      the provided `PostgresConnection`.
     /// - Returns: The closure's return value.
+    @_disfavoredOverload
     public func withConnection<Result>(_ closure: (PostgresConnection) async throws -> Result) async throws -> Result {
-        let connection = try await self.leaseConnection()
+        let lease = try await self.leaseConnection()
 
-        defer { self.pool.releaseConnection(connection) }
+        defer { lease.release() }
 
-        return try await closure(connection)
+        return try await closure(lease.connection)
+    }
+
+    /// Lease a connection for the provided `closure`'s lifetime.
+    ///
+    /// - Parameter closure: A closure that uses the passed `PostgresConnection`. The closure **must not** capture
+    ///                      the provided `PostgresConnection`.
+    /// - Returns: The closure's return value.
+    public func withConnection<Result>(
+        isolation: isolated (any Actor)? = #isolation,
+        _ closure: (PostgresConnection) async throws -> sending Result
+    ) async throws -> sending Result {
+        let lease = try await self.leaseConnection()
+
+        defer { lease.release() }
+
+        return try await closure(lease.connection)
+    }
+
+    /// Lease a connection, which is in an open transaction state, for the provided `closure`'s lifetime.
+    ///
+    /// The function leases a connection from the underlying connection pool and starts a transaction by running a `BEGIN`
+    /// query on the leased connection against the database. It then lends the connection to the user provided closure.
+    /// The user can then modify the database as they wish. If the user provided closure returns successfully, the function
+    /// will attempt to commit the changes by running a `COMMIT` query against the database. If the user provided closure
+    /// throws an error, the function will attempt to rollback the changes made within the closure.
+    ///
+    /// - Parameters:
+    ///   - logger: The `Logger` to log into for the transaction.
+    ///   - file: The file, the transaction was started in. Used for better error reporting.
+    ///   - line: The line, the transaction was started in. Used for better error reporting.
+    ///   - closure: The user provided code to modify the database. Use the provided connection to run queries.
+    ///              The connection must stay in the transaction mode. Otherwise this method will throw!
+    /// - Returns: The closure's return value.
+    public func withTransaction<Result>(
+        logger: Logger,
+        file: String = #file,
+        line: Int = #line,
+        isolation: isolated (any Actor)? = #isolation,
+        _ closure: (PostgresConnection) async throws -> sending Result
+    ) async throws -> sending Result {
+        // for 6.0 to compile we need to explicitly forward the isolation.
+        try await self.withConnection(isolation: isolation) { connection in
+            try await connection.withTransaction(logger: logger, file: file, line: line, isolation: isolation, closure)
+        }
     }
 
     /// Run a query on the Postgres server the client is connected to.
@@ -330,7 +374,8 @@ public final class PostgresClient: Sendable, ServiceLifecycle.Service {
                 throw PSQLError(code: .tooManyParameters, query: query, file: file, line: line)
             }
 
-            let connection = try await self.leaseConnection()
+            let lease = try await self.leaseConnection()
+            let connection = lease.connection
 
             var logger = logger
             logger[postgresMetadataKey: .connectionID] = "\(connection.id)"
@@ -345,12 +390,12 @@ public final class PostgresClient: Sendable, ServiceLifecycle.Service {
             connection.channel.write(HandlerTask.extendedQuery(context), promise: nil)
 
             promise.futureResult.whenFailure { _ in
-                self.pool.releaseConnection(connection)
+                lease.release()
             }
 
             return try await promise.futureResult.map {
                 $0.asyncSequence(onFinish: {
-                    self.pool.releaseConnection(connection)
+                    lease.release()
                 })
             }.get()
         } catch var error as PSQLError {
@@ -372,7 +417,8 @@ public final class PostgresClient: Sendable, ServiceLifecycle.Service {
         let logger = logger ?? Self.loggingDisabled
 
         do {
-            let connection = try await self.leaseConnection()
+            let lease = try await self.leaseConnection()
+            let connection = lease.connection
 
             let promise = connection.channel.eventLoop.makePromise(of: PSQLRowStream.self)
             let task = HandlerTask.executePreparedStatement(.init(
@@ -386,11 +432,11 @@ public final class PostgresClient: Sendable, ServiceLifecycle.Service {
             connection.channel.write(task, promise: nil)
 
             promise.futureResult.whenFailure { _ in
-                self.pool.releaseConnection(connection)
+                lease.release()
             }
 
             return try await promise.futureResult
-                .map { $0.asyncSequence(onFinish: { self.pool.releaseConnection(connection) }) }
+                .map { $0.asyncSequence(onFinish: { lease.release() }) }
                 .get()
                 .map { try preparedStatement.decodeRow($0) }
         } catch var error as PSQLError {
@@ -430,7 +476,7 @@ public final class PostgresClient: Sendable, ServiceLifecycle.Service {
 
     // MARK: - Private Methods -
 
-    private func leaseConnection() async throws -> PostgresConnection {
+    private func leaseConnection() async throws -> ConnectionLease<PostgresConnection> {
         if !self.runningAtomic.load(ordering: .relaxed) {
             self.backgroundLogger.warning("Trying to lease connection from `PostgresClient`, but `PostgresClient.run()` hasn't been called yet.")
         }

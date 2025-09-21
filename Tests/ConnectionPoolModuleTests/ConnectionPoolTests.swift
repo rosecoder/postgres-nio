@@ -1,12 +1,14 @@
 @testable import _ConnectionPoolModule
+import _ConnectionPoolTestUtils
 import Atomics
-import XCTest
 import NIOEmbedded
+import Testing
 
-@available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
-final class ConnectionPoolTests: XCTestCase {
 
-    func test1000ConsecutiveRequestsOnSingleConnection() async {
+@Suite struct ConnectionPoolTests {
+
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func test1000ConsecutiveRequestsOnSingleConnection() async {
         let factory = MockConnectionFactory<ContinuousClock>()
 
         var config = ConnectionPoolConfiguration()
@@ -33,37 +35,35 @@ final class ConnectionPoolTests: XCTestCase {
             let createdConnection = await factory.nextConnectAttempt { _ in
                 return 1
             }
-            XCTAssertNotNil(createdConnection)
 
             do {
                 for _ in 0..<1000 {
-                    async let connectionFuture = try await pool.leaseConnection()
-                    var leasedConnection: MockConnection?
-                    XCTAssertEqual(factory.pendingConnectionAttemptsCount, 0)
-                    leasedConnection = try await connectionFuture
-                    XCTAssertNotNil(leasedConnection)
-                    XCTAssert(createdConnection === leasedConnection)
+                    async let connectionFuture = pool.leaseConnection()
+                    var connectionLease: ConnectionLease<MockConnection>?
+                    #expect(factory.pendingConnectionAttemptsCount == 0)
+                    connectionLease = try await connectionFuture
+                    #expect(connectionLease != nil)
+                    #expect(createdConnection === connectionLease?.connection)
 
-                    if let leasedConnection {
-                        pool.releaseConnection(leasedConnection)
-                    }
+                    connectionLease?.release()
                 }
             } catch {
-                XCTFail("Unexpected error: \(error)")
+                Issue.record("Unexpected error: \(error)")
             }
 
             taskGroup.cancelAll()
 
-            XCTAssertEqual(factory.pendingConnectionAttemptsCount, 0)
+            #expect(factory.pendingConnectionAttemptsCount == 0)
             for connection in factory.runningConnections {
                 connection.closeIfClosing()
             }
         }
 
-        XCTAssertEqual(factory.runningConnections.count, 0)
+        #expect(factory.runningConnections.count == 0)
     }
 
-    func testShutdownPoolWhileConnectionIsBeingCreated() async {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testShutdownPoolWhileConnectionIsBeingCreated() async {
         let clock = MockClock()
         let factory = MockConnectionFactory<MockClock>()
 
@@ -108,7 +108,8 @@ final class ConnectionPoolTests: XCTestCase {
         struct ConnectionCreationError: Error {}
     }
 
-    func testShutdownPoolWhileConnectionIsBackingOff() async {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testShutdownPoolWhileConnectionIsBackingOff() async {
         let clock = MockClock()
         let factory = MockConnectionFactory<MockClock>()
 
@@ -143,7 +144,8 @@ final class ConnectionPoolTests: XCTestCase {
         struct ConnectionCreationError: Error {}
     }
 
-    func testConnectionHardLimitIsRespected() async {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testConnectionHardLimitIsRespected() async {
         let factory = MockConnectionFactory<ContinuousClock>()
 
         var mutableConfig = ConnectionPoolConfiguration()
@@ -172,21 +174,21 @@ final class ConnectionPoolTests: XCTestCase {
         await withTaskGroup(of: Void.self) { taskGroup in
             taskGroup.addTask_ {
                 await pool.run()
-                XCTAssertFalse(hasFinished.compareExchange(expected: false, desired: true, ordering: .relaxed).original)
+                #expect(hasFinished.compareExchange(expected: false, desired: true, ordering: .relaxed).original == false)
             }
 
             taskGroup.addTask_ {
                 var usedConnectionIDs = Set<Int>()
                 for _ in 0..<config.maximumConnectionHardLimit {
                     await factory.nextConnectAttempt { connectionID in
-                        XCTAssertTrue(usedConnectionIDs.insert(connectionID).inserted)
+                        #expect(usedConnectionIDs.insert(connectionID).inserted == true)
                         createdConnections.wrappingIncrement(ordering: .relaxed)
                         return 1
                     }
                 }
 
 
-                XCTAssertEqual(factory.pendingConnectionAttemptsCount, 0)
+                #expect(factory.pendingConnectionAttemptsCount == 0)
             }
 
             let (stream, continuation) = AsyncStream.makeStream(of: Void.self)
@@ -194,10 +196,10 @@ final class ConnectionPoolTests: XCTestCase {
             for _ in 0..<iterations {
                 taskGroup.addTask_ {
                     do {
-                        let leasedConnection = try await pool.leaseConnection()
-                        pool.releaseConnection(leasedConnection)
+                        let connectionLease = try await pool.leaseConnection()
+                        connectionLease.release()
                     } catch {
-                        XCTFail("Unexpected error: \(error)")
+                        Issue.record("Unexpected error: \(error)")
                     }
                     continuation.yield()
                 }
@@ -210,18 +212,19 @@ final class ConnectionPoolTests: XCTestCase {
 
             taskGroup.cancelAll()
 
-            XCTAssertFalse(hasFinished.load(ordering: .relaxed))
+            #expect(hasFinished.load(ordering: .relaxed) == false)
             for connection in factory.runningConnections {
                 connection.closeIfClosing()
             }
         }
 
-        XCTAssertEqual(createdConnections.load(ordering: .relaxed), config.maximumConnectionHardLimit)
-        XCTAssert(hasFinished.load(ordering: .relaxed))
-        XCTAssertEqual(factory.runningConnections.count, 0)
+        #expect(createdConnections.load(ordering: .relaxed) == config.maximumConnectionHardLimit)
+        #expect(hasFinished.load(ordering: .relaxed) == true)
+        #expect(factory.runningConnections.count == 0)
     }
 
-    func testKeepAliveWorks() async throws {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testKeepAliveWorks() async throws {
         let clock = MockClock()
         let factory = MockConnectionFactory<MockClock>()
         let keepAliveDuration = Duration.seconds(30)
@@ -249,16 +252,16 @@ final class ConnectionPoolTests: XCTestCase {
                 await pool.run()
             }
 
-            async let lease1ConnectionAsync = pool.leaseConnection()
+            async let connectionLeaseFuture = pool.leaseConnection()
 
             let connection = await factory.nextConnectAttempt { connectionID in
                 return 1
             }
 
-            let lease1Connection = try await lease1ConnectionAsync
-            XCTAssert(connection === lease1Connection)
+            let connectionLease = try await connectionLeaseFuture
+            #expect(connection === connectionLease.connection)
 
-            pool.releaseConnection(lease1Connection)
+            connectionLease.release()
 
             // keep alive 1
 
@@ -266,11 +269,11 @@ final class ConnectionPoolTests: XCTestCase {
             var expectedInstants: Set<MockClock.Instant> = [.init(keepAliveDuration), .init(config.idleTimeout)]
             let deadline1 = await clock.nextTimerScheduled()
             print(deadline1)
-            XCTAssertNotNil(expectedInstants.remove(deadline1))
+            #expect(expectedInstants.remove(deadline1) != nil)
             let deadline2 = await clock.nextTimerScheduled()
             print(deadline2)
-            XCTAssertNotNil(expectedInstants.remove(deadline2))
-            XCTAssert(expectedInstants.isEmpty)
+            #expect(expectedInstants.remove(deadline2) != nil)
+            #expect(expectedInstants.isEmpty == true)
 
             // move clock forward to keep alive
             let newTime = clock.now.advanced(by: keepAliveDuration)
@@ -279,14 +282,14 @@ final class ConnectionPoolTests: XCTestCase {
 
             await keepAlive.nextKeepAlive { keepAliveConnection in
                 defer { print("keep alive 1 has run") }
-                XCTAssertTrue(keepAliveConnection === lease1Connection)
+                #expect(keepAliveConnection === connectionLease.connection)
                 return true
             }
 
             // keep alive 2
 
             let deadline3 = await clock.nextTimerScheduled()
-            XCTAssertEqual(deadline3, clock.now.advanced(by: keepAliveDuration))
+            #expect(deadline3 == clock.now.advanced(by: keepAliveDuration))
             print(deadline3)
 
             // race keep alive vs timeout
@@ -300,7 +303,8 @@ final class ConnectionPoolTests: XCTestCase {
         }
     }
 
-    func testKeepAliveOnClose() async throws {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testKeepAliveOnClose() async throws {
         let clock = MockClock()
         let factory = MockConnectionFactory<MockClock>()
         let keepAliveDuration = Duration.seconds(20)
@@ -328,16 +332,16 @@ final class ConnectionPoolTests: XCTestCase {
                 await pool.run()
             }
 
-            async let lease1ConnectionAsync = pool.leaseConnection()
+            async let connectionLeaseFuture = pool.leaseConnection()
 
             let connection = await factory.nextConnectAttempt { connectionID in
                 return 1
             }
 
-            let lease1Connection = try await lease1ConnectionAsync
-            XCTAssert(connection === lease1Connection)
+            let connectionLease = try await connectionLeaseFuture
+            #expect(connection === connectionLease.connection)
 
-            pool.releaseConnection(lease1Connection)
+            connectionLease.release()
 
             // keep alive 1
 
@@ -345,38 +349,38 @@ final class ConnectionPoolTests: XCTestCase {
             var expectedInstants: Set<MockClock.Instant> = [.init(keepAliveDuration), .init(config.idleTimeout)]
             let deadline1 = await clock.nextTimerScheduled()
             print(deadline1)
-            XCTAssertNotNil(expectedInstants.remove(deadline1))
+            #expect(expectedInstants.remove(deadline1) != nil)
             let deadline2 = await clock.nextTimerScheduled()
             print(deadline2)
-            XCTAssertNotNil(expectedInstants.remove(deadline2))
-            XCTAssert(expectedInstants.isEmpty)
+            #expect(expectedInstants.remove(deadline2) != nil)
+            #expect(expectedInstants.isEmpty)
 
             // move clock forward to keep alive
             let newTime = clock.now.advanced(by: keepAliveDuration)
             clock.advance(to: newTime)
 
             await keepAlive.nextKeepAlive { keepAliveConnection in
-                XCTAssertTrue(keepAliveConnection === lease1Connection)
+                #expect(keepAliveConnection === connectionLease.connection)
                 return true
             }
 
             // keep alive 2
             let deadline3 = await clock.nextTimerScheduled()
-            XCTAssertEqual(deadline3, clock.now.advanced(by: keepAliveDuration))
+            #expect(deadline3 == clock.now.advanced(by: keepAliveDuration))
             clock.advance(to: clock.now.advanced(by: keepAliveDuration))
 
             let failingKeepAliveDidRun = ManagedAtomic(false)
             // the following keep alive should not cause a crash
             _ = try? await keepAlive.nextKeepAlive { keepAliveConnection in
                 defer { 
-                    XCTAssertFalse(failingKeepAliveDidRun
-                        .compareExchange(expected: false, desired: true, ordering: .relaxed).original)
+                    #expect(failingKeepAliveDidRun
+                        .compareExchange(expected: false, desired: true, ordering: .relaxed).original == false)
                 }
-                XCTAssertTrue(keepAliveConnection === lease1Connection)
+                #expect(keepAliveConnection === connectionLease.connection)
                 keepAliveConnection.close()
                 throw CancellationError() // any error 
             } // will fail and it's expected
-            XCTAssertTrue(failingKeepAliveDidRun.load(ordering: .relaxed))
+            #expect(failingKeepAliveDidRun.load(ordering: .relaxed) == true)
 
             taskGroup.cancelAll()
 
@@ -386,7 +390,8 @@ final class ConnectionPoolTests: XCTestCase {
         }
     }
 
-    func testKeepAliveWorksRacesAgainstShutdown() async throws {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testKeepAliveWorksRacesAgainstShutdown() async throws {
         let clock = MockClock()
         let factory = MockConnectionFactory<MockClock>()
         let keepAliveDuration = Duration.seconds(30)
@@ -414,16 +419,16 @@ final class ConnectionPoolTests: XCTestCase {
                 await pool.run()
             }
 
-            async let lease1ConnectionAsync = pool.leaseConnection()
+            async let connectionLeaseFuture = pool.leaseConnection()
 
             let connection = await factory.nextConnectAttempt { connectionID in
                 return 1
             }
 
-            let lease1Connection = try await lease1ConnectionAsync
-            XCTAssert(connection === lease1Connection)
+            let connectionLease = try await connectionLeaseFuture
+            #expect(connection === connectionLease.connection)
 
-            pool.releaseConnection(lease1Connection)
+            connectionLease.release()
 
             // keep alive 1
 
@@ -431,17 +436,17 @@ final class ConnectionPoolTests: XCTestCase {
             var expectedInstants: Set<MockClock.Instant> = [.init(keepAliveDuration), .init(config.idleTimeout)]
             let deadline1 = await clock.nextTimerScheduled()
             print(deadline1)
-            XCTAssertNotNil(expectedInstants.remove(deadline1))
+            #expect(expectedInstants.remove(deadline1) != nil)
             let deadline2 = await clock.nextTimerScheduled()
             print(deadline2)
-            XCTAssertNotNil(expectedInstants.remove(deadline2))
-            XCTAssert(expectedInstants.isEmpty)
+            #expect(expectedInstants.remove(deadline2) != nil)
+            #expect(expectedInstants.isEmpty)
 
             clock.advance(to: clock.now.advanced(by: keepAliveDuration))
 
             await keepAlive.nextKeepAlive { keepAliveConnection in
                 defer { print("keep alive 1 has run") }
-                XCTAssertTrue(keepAliveConnection === lease1Connection)
+                #expect(keepAliveConnection === connectionLease.connection)
                 return true
             }
 
@@ -454,7 +459,8 @@ final class ConnectionPoolTests: XCTestCase {
         }
     }
 
-    func testCancelConnectionRequestWorks() async throws {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testCancelConnectionRequestWorks() async throws {
         let clock = MockClock()
         let factory = MockConnectionFactory<MockClock>()
         let keepAliveDuration = Duration.seconds(30)
@@ -502,9 +508,9 @@ final class ConnectionPoolTests: XCTestCase {
             let taskResult = await leaseTask.result
             switch taskResult {
             case .success:
-                XCTFail("Expected task failure")
+                Issue.record("Expected task failure")
             case .failure(let failure):
-                XCTAssertEqual(failure as? ConnectionPoolError, .requestCancelled)
+                #expect(failure as? ConnectionPoolError == .requestCancelled)
             }
 
             taskGroup.cancelAll()
@@ -514,7 +520,8 @@ final class ConnectionPoolTests: XCTestCase {
         }
     }
 
-    func testLeasingMultipleConnectionsAtOnceWorks() async throws {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testLeasingMultipleConnectionsAtOnceWorks() async throws {
         let clock = MockClock()
         let factory = MockConnectionFactory<MockClock>()
         let keepAliveDuration = Duration.seconds(30)
@@ -555,19 +562,19 @@ final class ConnectionPoolTests: XCTestCase {
 
             // lease 4 connections at once
             pool.leaseConnections(requests)
-            var connections = [MockConnection]()
+            var connectionLeases = [ConnectionLease<MockConnection>]()
 
             for request in requests {
                 let connection = try await request.future.success
-                connections.append(connection)
+                connectionLeases.append(connection)
             }
 
             // Ensure that we got 4 distinct connections
-            XCTAssertEqual(Set(connections.lazy.map(\.id)).count, 4)
+            #expect(Set(connectionLeases.lazy.map(\.connection.id)).count == 4)
 
             // release all 4 leased connections
-            for connection in connections {
-                pool.releaseConnection(connection)
+            for lease in connectionLeases {
+                lease.release()
             }
 
             // shutdown
@@ -578,7 +585,8 @@ final class ConnectionPoolTests: XCTestCase {
         }
     }
 
-    func testLeasingConnectionAfterShutdownIsInvokedFails() async throws {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testLeasingConnectionAfterShutdownIsInvokedFails() async throws {
         let clock = MockClock()
         let factory = MockConnectionFactory<MockClock>()
         let keepAliveDuration = Duration.seconds(30)
@@ -619,10 +627,10 @@ final class ConnectionPoolTests: XCTestCase {
 
             do {
                 _ = try await pool.leaseConnection()
-                XCTFail("Expected a failure")
+                Issue.record("Expected a failure")
             } catch {
                 print("failed")
-                XCTAssertEqual(error as? ConnectionPoolError, .poolShutdown)
+                #expect(error as? ConnectionPoolError == .poolShutdown)
             }
 
             print("will close connections: \(factory.runningConnections)")
@@ -633,7 +641,8 @@ final class ConnectionPoolTests: XCTestCase {
         }
     }
 
-    func testLeasingConnectionsAfterShutdownIsInvokedFails() async throws {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testLeasingConnectionsAfterShutdownIsInvokedFails() async throws {
         let clock = MockClock()
         let factory = MockConnectionFactory<MockClock>()
         let keepAliveDuration = Duration.seconds(30)
@@ -681,9 +690,9 @@ final class ConnectionPoolTests: XCTestCase {
             for request in requests {
                 do {
                     _ = try await request.future.success
-                    XCTFail("Expected a failure")
+                    Issue.record("Expected a failure")
                 } catch {
-                    XCTAssertEqual(error as? ConnectionPoolError, .poolShutdown)
+                    #expect(error as? ConnectionPoolError == .poolShutdown)
                 }
             }
 
@@ -694,7 +703,8 @@ final class ConnectionPoolTests: XCTestCase {
         }
     }
 
-    func testLeasingMultipleStreamsFromOneConnectionWorks() async throws {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testLeasingMultipleStreamsFromOneConnectionWorks() async throws {
         let clock = MockClock()
         let factory = MockConnectionFactory<MockClock>()
         let keepAliveDuration = Duration.seconds(30)
@@ -726,7 +736,7 @@ final class ConnectionPoolTests: XCTestCase {
             // create 4 connection requests
             let requests = (0..<10).map { ConnectionFuture(id: $0) }
             pool.leaseConnections(requests)
-            var connections = [MockConnection]()
+            var connectionLeases = [ConnectionLease<MockConnection>]()
 
             await factory.nextConnectAttempt { connectionID in
                 return 10
@@ -734,15 +744,15 @@ final class ConnectionPoolTests: XCTestCase {
 
             for request in requests {
                 let connection = try await request.future.success
-                connections.append(connection)
+                connectionLeases.append(connection)
             }
 
             // Ensure that all requests got the same connection
-            XCTAssertEqual(Set(connections.lazy.map(\.id)).count, 1)
+            #expect(Set(connectionLeases.lazy.map(\.connection.id)).count == 1)
 
             // release all 10 leased streams
-            for connection in connections {
-                pool.releaseConnection(connection)
+            for lease in connectionLeases {
+                lease.release()
             }
 
             for _ in 0..<9 {
@@ -759,7 +769,8 @@ final class ConnectionPoolTests: XCTestCase {
         }
     }
 
-    func testIncreasingAvailableStreamsWorks() async throws {
+    @available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, *)
+    @Test func testIncreasingAvailableStreamsWorks() async throws {
         let clock = MockClock()
         let factory = MockConnectionFactory<MockClock>()
         let keepAliveDuration = Duration.seconds(30)
@@ -791,41 +802,41 @@ final class ConnectionPoolTests: XCTestCase {
             // create 4 connection requests
             var requests = (0..<21).map { ConnectionFuture(id: $0) }
             pool.leaseConnections(requests)
-            var connections = [MockConnection]()
+            var connectionLease = [ConnectionLease<MockConnection>]()
 
             await factory.nextConnectAttempt { connectionID in
                 return 1
             }
 
-            let connection = try await requests.first!.future.success
-            connections.append(connection)
+            let lease = try await requests.first!.future.success
+            connectionLease.append(lease)
             requests.removeFirst()
 
-            pool.connectionReceivedNewMaxStreamSetting(connection, newMaxStreamSetting: 21)
+            pool.connectionReceivedNewMaxStreamSetting(lease.connection, newMaxStreamSetting: 21)
 
             for (_, request) in requests.enumerated() {
                 let connection = try await request.future.success
-                connections.append(connection)
+                connectionLease.append(connection)
             }
 
             // Ensure that all requests got the same connection
-            XCTAssertEqual(Set(connections.lazy.map(\.id)).count, 1)
+            #expect(Set(connectionLease.lazy.map(\.connection.id)).count == 1)
 
             requests = (22..<42).map { ConnectionFuture(id: $0) }
             pool.leaseConnections(requests)
 
             // release all 21 leased streams in a single call
-            pool.releaseConnection(connection, streams: 21)
+            pool.releaseConnection(lease.connection, streams: 21)
 
             // ensure all 20 new requests got fulfilled
             for request in requests {
                 let connection = try await request.future.success
-                connections.append(connection)
+                connectionLease.append(connection)
             }
 
             // release all 20 leased streams one by one
             for _ in requests {
-                pool.releaseConnection(connection, streams: 1)
+                pool.releaseConnection(lease.connection, streams: 1)
             }
 
             // shutdown
@@ -839,14 +850,14 @@ final class ConnectionPoolTests: XCTestCase {
 
 struct ConnectionFuture: ConnectionRequestProtocol {
     let id: Int
-    let future: Future<MockConnection>
+    let future: Future<ConnectionLease<MockConnection>>
 
     init(id: Int) {
         self.id = id
-        self.future = Future(of: MockConnection.self)
+        self.future = Future(of: ConnectionLease<MockConnection>.self)
     }
 
-    func complete(with result: Result<MockConnection, ConnectionPoolError>) {
+    func complete(with result: Result<ConnectionLease<MockConnection>, ConnectionPoolError>) {
         switch result {
         case .success(let success):
             self.future.yield(value: success)
