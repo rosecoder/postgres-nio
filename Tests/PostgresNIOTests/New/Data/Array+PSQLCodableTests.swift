@@ -57,7 +57,7 @@ import NIOCore
         #expect([UUID].psqlType == .uuidArray)
 
         #expect(Date.psqlArrayType == .timestamptzArray)
-        #expect(Date.psqlType == .timestamptz)
+        #expect(Date.psqlType == .timestamp)
         #expect([Date].psqlType == .timestamptzArray)
 
         #expect(Range<Int32>.psqlArrayType == .int4RangeArray)

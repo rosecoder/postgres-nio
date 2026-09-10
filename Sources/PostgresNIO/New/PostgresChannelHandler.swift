@@ -3,13 +3,13 @@ import NIOTLS
 import Crypto
 import Logging
 
-final class PostgresChannelHandler: ChannelDuplexHandler {
+final class PostgresChannelHandler: ChannelDuplexHandler, RemovableChannelHandler {
     typealias OutboundIn = HandlerTask
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
 
     private let logger: Logger
-    private let eventLoop: EventLoop
+    private let eventLoop: any EventLoop
     private var state: ConnectionStateMachine
     
     /// A `ChannelHandlerContext` to be used for non channel related events. (for example: More rows needed).
@@ -20,16 +20,16 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
     private var decoder: NIOSingleStepByteToMessageProcessor<PostgresBackendMessageDecoder>
     private var encoder: PostgresFrontendMessageEncoder!
     private let configuration: PostgresConnection.InternalConfiguration
-    private let configureSSLCallback: ((Channel, PostgresChannelHandler) throws -> Void)?
+    private let configureSSLCallback: ((any Channel, PostgresChannelHandler) throws -> Void)?
 
     private var listenState = ListenStateMachine()
     private var preparedStatementState = PreparedStatementStateMachine()
 
     init(
         configuration: PostgresConnection.InternalConfiguration,
-        eventLoop: EventLoop,
+        eventLoop: any EventLoop,
         logger: Logger,
-        configureSSLCallback: ((Channel, PostgresChannelHandler) throws -> Void)?
+        configureSSLCallback: ((any Channel, PostgresChannelHandler) throws -> Void)?
     ) {
         self.state = ConnectionStateMachine(requireBackendKeyData: configuration.options.requireBackendKeyData)
         self.eventLoop = eventLoop
@@ -38,24 +38,6 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
         self.logger = logger
         self.decoder = NIOSingleStepByteToMessageProcessor(PostgresBackendMessageDecoder())
     }
-    
-    #if DEBUG
-    /// for testing purposes only
-    init(
-        configuration: PostgresConnection.InternalConfiguration,
-        eventLoop: EventLoop,
-        state: ConnectionStateMachine = .init(.initialized),
-        logger: Logger = .psqlNoOpLogger,
-        configureSSLCallback: ((Channel, PostgresChannelHandler) throws -> Void)?
-    ) {
-        self.state = state
-        self.eventLoop = eventLoop
-        self.configuration = configuration
-        self.configureSSLCallback = configureSSLCallback
-        self.logger = logger
-        self.decoder = NIOSingleStepByteToMessageProcessor(PostgresBackendMessageDecoder())
-    }
-    #endif
 
     // MARK: Handler lifecycle
     
@@ -100,7 +82,7 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
         self.run(action, with: context)
     }
     
-    func errorCaught(context: ChannelHandlerContext, error: Error) {
+    func errorCaught(context: ChannelHandlerContext, error: any Error) {
         self.logger.debug("Channel error caught.", metadata: [.error: "\(error)"])
         let action = self.state.errorHappened(.connectionError(underlying: error))
         self.run(action, with: context)
@@ -171,9 +153,79 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
         self.run(action, with: context)
     }
 
+    /// Succeed the promise when the channel to the backend is writable and the backend is ready to receive more data.
+    ///
+    /// The promise may be failed if the backend indicated that it can't handle any more data by sending an
+    /// `ErrorResponse`. This is mostly the case when malformed data is sent to it. In that case, the data transfer
+    /// should be aborted to avoid unnecessary work.
+    func checkBackendCanReceiveCopyData(promise: EventLoopPromise<Void>) {
+        guard let handlerContext else {
+            promise.fail(PostgresError.connectionClosed)
+            return
+        }
+        let action = self.state.checkBackendCanReceiveCopyData(channelIsWritable: handlerContext.channel.isWritable, promise: promise)
+        switch action {
+        case .none:
+            break
+        case .succeedPromise(let promise):
+            promise.succeed()
+        case .failPromise(let promise, error: let error):
+            promise.fail(error)
+        }
+    }
+
+    /// Cancel the currently executing operation, if it is cancellable.
+    func cancel() {
+        guard let handlerContext else {
+            return
+        }
+        let action = self.state.cancel()
+        self.run(action, with: handlerContext)
+    }
+
+    /// Send a `CopyData` message to the backend using the given data.
+    func sendCopyData(_ data: ByteBuffer) throws {
+        guard let handlerContext else {
+            throw PostgresError.connectionClosed
+        }
+        self.encoder.copyDataHeader(dataLength: UInt32(data.readableBytes))
+        handlerContext.write(self.wrapOutboundOut(self.encoder.flushBuffer()), promise: nil)
+        handlerContext.writeAndFlush(self.wrapOutboundOut(data), promise: nil)
+    }
+
+    /// Put the state machine out of the copying mode and send a `CopyDone` message to the backend.
+    func sendCopyDone(continuation: CheckedContinuation<Void, any Error>) {
+        guard let handlerContext else {
+            continuation.resume(throwing: PostgresError.connectionClosed)
+            return
+        }
+        let action = self.state.sendCopyDone(continuation: continuation)
+        self.run(action, with: handlerContext)
+    }
+
+    /// Put the state machine out of the copying mode and send a `CopyFail` message to the backend.
+    func sendCopyFail(message: String, continuation: CheckedContinuation<Void, any Error>) {
+        guard let handlerContext else {
+            continuation.resume(throwing: PostgresError.connectionClosed)
+            return
+        }
+        let action = self.state.sendCopyFail(message: message, continuation: continuation)
+        self.run(action, with: handlerContext)
+    }
+
     func channelReadComplete(context: ChannelHandlerContext) {
         let action = self.state.channelReadComplete()
         self.run(action, with: context)
+    }
+
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        let action = self.state.channelWritabilityChanged(isWritable: context.channel.isWritable)
+        switch action {
+        case .none:
+            break
+        case .succeedPromise(let promise):
+            promise.succeed()
+        }
     }
     
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
@@ -209,6 +261,7 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
             psqlTask = .extendedQuery(query)
 
         case .startListening(let listener):
+            defer { promise?.succeed(()) }
             switch self.listenState.startListening(listener) {
             case .startListening(let channel):
                 psqlTask = self.makeStartListeningQuery(channel: channel, context: context)
@@ -355,12 +408,36 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
             self.sendParseDescribeBindExecuteAndSyncMessage(query: query, context: context)
         case .succeedQuery(let promise, with: let result):
             self.succeedQuery(promise, result: result, context: context)
+        case .succeedQueryContinuation(let continuation, let sync):
+            if sync {
+                self.encoder.sync()
+                context.writeAndFlush(self.wrapOutboundOut(self.encoder.flushBuffer()), promise: nil)
+            }
+            continuation.resume()
         case .failQuery(let promise, with: let error, let cleanupContext):
             promise.fail(error)
             if let cleanupContext = cleanupContext {
                 self.closeConnectionAndCleanup(cleanupContext, context: context)
             }
-        
+        case .failQueryContinuation(let continuation, with: let error, let sync, let cleanupContext):
+            if sync {
+                self.encoder.sync()
+                context.writeAndFlush(self.wrapOutboundOut(self.encoder.flushBuffer()), promise: nil)
+            }
+            if let cleanupContext = cleanupContext {
+                self.closeConnectionAndCleanup(cleanupContext, context: context)
+            }
+            continuation.resume(throwing: error)
+        case .triggerCopyData(let triggerCopy):
+            let writer = PostgresCopyFromWriter(handler: self, eventLoop: eventLoop)
+            triggerCopy.resume(returning: writer)
+        case .sendCopyDoneAndSync:
+            self.encoder.copyDone()
+            self.encoder.sync()
+            context.writeAndFlush(self.wrapOutboundOut(self.encoder.flushBuffer()), promise: nil)
+        case .sendCopyFail(message: let message):
+            self.encoder.copyFail(message: message)
+            context.writeAndFlush(self.wrapOutboundOut(self.encoder.flushBuffer()), promise: nil)
         case .forwardRows(let rows):
             self.rowStream!.receive(rows)
             
@@ -427,6 +504,9 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
             }
         case .forwardNotificationToListeners(let notification):
             self.forwardNotificationToListeners(notification, context: context)
+        case .failPromiseAndCloseConnection(let promise, let error, let cleanupContext):
+            promise.fail(error)
+            self.closeConnectionAndCleanup(cleanupContext, context: context)
         }
     }
     
@@ -438,7 +518,7 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
     }
     
     private func establishSSLConnection(context: ChannelHandlerContext) {
-        // This method must only be called, if we signalized the StateMachine before that we are
+        // This method must only be called if we signaled to the StateMachine before that we are
         // able to setup a SSL connection.
         do {
             try self.configureSSLCallback!(context.channel, self)
@@ -615,7 +695,7 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
         return .extendedQuery(query)
     }
 
-    private func startListenCompleted(_ result: Result<PSQLRowStream, Error>, for channel: String, context: ChannelHandlerContext) {
+    private func startListenCompleted(_ result: Result<PSQLRowStream, any Error>, for channel: String, context: ChannelHandlerContext) {
         switch result {
         case .success:
             switch self.listenState.startListeningSucceeded(channel: channel) {
@@ -664,7 +744,7 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
     }
 
     private func stopListenCompleted(
-        _ result: Result<PSQLRowStream, Error>,
+        _ result: Result<PSQLRowStream, any Error>,
         for channel: String,
         context: ChannelHandlerContext
     ) {
@@ -803,11 +883,10 @@ extension PostgresChannelHandler: PSQLRowsDataSource {
     }
     
     func cancel(for stream: PSQLRowStream) {
-        guard self.rowStream === stream, let handlerContext = self.handlerContext else {
+        guard self.rowStream === stream else {
             return
         }
-        let action = self.state.cancelQueryStream()
-        self.run(action, with: handlerContext)
+        self.cancel()
     }
 }
 
